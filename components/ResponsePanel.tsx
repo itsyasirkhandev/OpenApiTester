@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ApiResponse } from '../types';
-import { SpinnerIcon } from './icons';
+import { SpinnerIcon, ClipboardDocumentIcon, CheckIcon } from './icons';
 import JsonViewer from './JsonViewer';
 
 interface ResponsePanelProps {
@@ -15,6 +15,7 @@ type BodyView = 'Pretty' | 'Raw' | 'Preview';
 const ResponsePanel: React.FC<ResponsePanelProps> = ({ response, error, loading }) => {
     const [activeTab, setActiveTab] = useState<Tab>('Body');
     const [bodyView, setBodyView] = useState<BodyView>('Pretty');
+    const [copied, setCopied] = useState(false);
 
     const getStatusBadgeClass = (status: number) => {
         if (status >= 200 && status < 300) return 'bg-green-500/20 text-green-300';
@@ -22,6 +23,19 @@ const ResponsePanel: React.FC<ResponsePanelProps> = ({ response, error, loading 
         if (status >= 400 && status < 500) return 'bg-orange-500/20 text-orange-400';
         if (status >= 500) return 'bg-red-500/20 text-red-400';
         return 'bg-slate-500/20 text-slate-300';
+    };
+
+    const handleCopy = () => {
+        if (!response?.data) return;
+
+        const textToCopy = typeof response.data === 'string' 
+            ? response.data 
+            : JSON.stringify(response.data, null, 2);
+
+        navigator.clipboard.writeText(textToCopy).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        });
     };
 
     const renderBody = () => {
@@ -122,7 +136,7 @@ const ResponsePanel: React.FC<ResponsePanelProps> = ({ response, error, loading 
                     ))}
                 </div>
                 {activeTab === 'Body' && (
-                    <div className="flex items-center space-x-1">
+                    <div className="flex items-center space-x-2">
                          {(['Pretty', 'Raw', 'Preview'] as BodyView[]).map(view => (
                             <button key={view} onClick={() => setBodyView(view)}
                                 className={`px-2 py-0.5 text-xs rounded-md transition-colors ${bodyView === view ? 'bg-indigo-600 text-white' : 'bg-slate-700 hover:bg-slate-600'}`}
@@ -130,6 +144,15 @@ const ResponsePanel: React.FC<ResponsePanelProps> = ({ response, error, loading 
                                 {view}
                             </button>
                         ))}
+                        {response.data && (
+                            <button 
+                                onClick={handleCopy}
+                                className="p-1 rounded-md transition-colors text-slate-400 hover:bg-slate-700 hover:text-white"
+                                title="Copy response body"
+                            >
+                                {copied ? <CheckIcon className="w-4 h-4 text-green-400" /> : <ClipboardDocumentIcon className="w-4 h-4" />}
+                            </button>
+                        )}
                     </div>
                 )}
             </div>

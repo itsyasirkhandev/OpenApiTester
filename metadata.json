@@ -1,5 +1,5 @@
 {
-  "name": "API Craft & Plan",
+  "name": "API Tester",
   "description": "An intelligent API testing and planning web application. Describe your API endpoint in plain English, and let AI generate test cases for you. Then, execute requests and inspect responses with a clean, developer-friendly interface.",
   "requestFramePermissions": []
 }
