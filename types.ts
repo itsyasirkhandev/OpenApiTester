@@ -40,6 +40,12 @@ export interface AuthConfig {
     basicPassword?: string;
 }
 
+export enum BodyType {
+    RAW = 'raw',
+    FORMDATA = 'form-data',
+    URLENCODED = 'x-www-form-urlencoded',
+}
+
 export interface ApiRequest {
     id: string;
     url: string;
@@ -49,6 +55,8 @@ export interface ApiRequest {
     body: string;
     auth: AuthConfig;
     name?: string;
+    bodyType?: BodyType;
+    formData?: KeyValue[];
 }
 
 export interface ApiResponse {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ApiRequest, HttpMethod, KeyValue, AuthConfig, Environment } from '../types';
+import { ApiRequest, HttpMethod, KeyValue, AuthConfig, Environment, BodyType } from '../types';
 import { HTTP_METHODS, METHOD_COLORS } from '../constants';
 import KeyValueEditor from './KeyValueEditor';
 import AuthorizationPanel from './AuthorizationPanel';
@@ -24,7 +24,6 @@ const RequestPanel: React.FC<RequestPanelProps> = ({
     onGenerateCode, onImportCurl,
 }) => {
     const [activeTab, setActiveTab] = useState<Tab>('Params');
-    const [isUrlFocused, setIsUrlFocused] = useState(false);
     
     const isMac = useMemo(() => navigator.platform.toUpperCase().indexOf('MAC') >= 0, []);
     const sendShortcut = isMac ? '⌘+Enter' : 'Ctrl+Enter';
@@ -32,60 +31,53 @@ const RequestPanel: React.FC<RequestPanelProps> = ({
 
     const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const newUrl = e.target.value;
-        const oldUrl = request.url;
-        setRequest(prev => ({...prev, url: newUrl }));
+        const [, queryString] = newUrl.split('?');
         
-        // Basic auto-param generation, avoiding excessive updates
-        if (newUrl.includes('?') && !oldUrl.includes('?')) {
+        const newParams: KeyValue[] = [];
+        if (queryString !== undefined) {
             try {
-                const url = new URL(newUrl.startsWith('http') ? newUrl : `http://${newUrl}`);
-                const newParams: KeyValue[] = [];
-                url.searchParams.forEach((value, key) => {
-                     if (!request.params.some(p => p.key === key)) {
-                        newParams.push({ id: crypto.randomUUID(), key, value, enabled: true });
-                     }
+                const searchParams = new URLSearchParams(queryString);
+                searchParams.forEach((value, key) => {
+                    newParams.push({ id: crypto.randomUUID(), key, value, enabled: true });
                 });
-                if (newParams.length > 0) {
-                     setRequest(prev => ({ ...prev, params: [...prev.params, ...newParams] }));
-                }
-            } catch (e) {
-                // Invalid URL during typing, ignore
+            } catch {
+                 // Silently fail on invalid query string during typing
             }
         }
+        
+        // Update the URL and the params from the parsed URL.
+        // The URL in state will contain the full string, including query params.
+        // The params in state are for the KeyValueEditor.
+        setRequest(prev => ({
+            ...prev,
+            url: newUrl,
+            params: newParams,
+        }));
     };
-    
-    // Update URL when params change
-    useEffect(() => {
-        if (!isUrlFocused) {
-            try {
-                const [baseUrl] = request.url.split('?');
-                const params = new URLSearchParams();
-                request.params.forEach(p => {
-                    if (p.enabled && p.key) {
-                        params.append(p.key, p.value);
-                    }
-                });
-                const queryString = params.toString();
-                setRequest(prev => ({
-                    ...prev,
-                    url: queryString ? `${baseUrl}?${queryString}` : baseUrl
-                }));
-            } catch(e) {
-                console.error("Error updating URL from params", e);
-            }
-        }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [request.params, isUrlFocused]);
-
 
     const handleAuthChange = (auth: AuthConfig) => {
         setRequest(prev => ({...prev, auth}));
     };
     
+    const handleBodyTypeChange = (type: BodyType) => {
+        setRequest(prev => ({ ...prev, bodyType: type }));
+    };
+
+    const bodyCount = useMemo(() => {
+        const bodyType = request.bodyType || BodyType.RAW;
+        if (bodyType === BodyType.RAW) {
+            return request.body.trim().length > 0;
+        }
+        if (bodyType === BodyType.FORMDATA || bodyType === BodyType.URLENCODED) {
+            return (request.formData || []).filter(i => i.enabled && i.key).length;
+        }
+        return false;
+    }, [request.body, request.bodyType, request.formData]);
+
     const counts = {
         Params: request.params.filter(p => p.enabled && p.key).length,
         Headers: request.headers.filter(h => h.enabled && h.key).length,
-        Body: request.body.trim().length > 0
+        Body: bodyCount,
     };
 
     return (
@@ -106,8 +98,6 @@ const RequestPanel: React.FC<RequestPanelProps> = ({
                         placeholder="https://jsonplaceholder.typicode.com/posts"
                         value={request.url}
                         onChange={handleUrlChange}
-                        onFocus={() => setIsUrlFocused(true)}
-                        onBlur={() => setIsUrlFocused(false)}
                         className="flex-1 w-full bg-transparent px-3 py-2 text-slate-300 focus:ring-0 focus:outline-none text-base leading-tight"
                     />
                     <button onClick={onImportCurl} title="Import from cURL" className="px-3 text-slate-400 hover:bg-slate-700 hover:text-white transition-colors border-l border-slate-700">
@@ -139,41 +129,76 @@ const RequestPanel: React.FC<RequestPanelProps> = ({
                         }`}
                     >
                         <span>{tab}</span>
-                        {/* Fix: Use type narrowing to safely check counts for different tabs. */}
-                         {tab !== 'Authorization' && (((tab === 'Params' || tab === 'Headers') && counts[tab] > 0) || (tab === 'Body' && counts.Body)) && (
+                        { tab === 'Body' && (typeof counts.Body === 'number' ? counts.Body > 0 : counts.Body) && (
                             <span className={`ml-2 text-xs font-mono rounded-full px-1.5 py-0.5 flex items-center justify-center ${activeTab === tab ? 'bg-indigo-500/30 text-indigo-200' : 'bg-slate-700 text-slate-300'}`}>
-                                {tab === 'Body' ? <CheckIcon className="w-3 h-3" /> : counts[tab]}
+                                {typeof counts.Body === 'number' ? counts.Body : <CheckIcon className="w-3 h-3" />}
+                            </span>
+                        )}
+                         { (tab === 'Params' || tab === 'Headers') && counts[tab] > 0 && (
+                            <span className={`ml-2 text-xs font-mono rounded-full px-1.5 py-0.5 flex items-center justify-center ${activeTab === tab ? 'bg-indigo-500/30 text-indigo-200' : 'bg-slate-700 text-slate-300'}`}>
+                                {counts[tab]}
                             </span>
                         )}
                     </button>
                 ))}
             </div>
-            <div className="flex-1 p-2 overflow-y-auto">
+            <div className="flex-1 overflow-y-auto">
                 {activeTab === 'Params' && (
-                    <KeyValueEditor 
-                        items={request.params} 
-                        setItems={(updater) => setRequest(prev => ({...prev, params: typeof updater === 'function' ? updater(prev.params) : updater}))} 
-                        keyPlaceholder="Query Param"
-                        environment={environment}
-                    />
+                    <div className="p-2">
+                        <KeyValueEditor 
+                            items={request.params} 
+                            setItems={(updater) => setRequest(prev => ({...prev, params: typeof updater === 'function' ? updater(prev.params) : updater}))} 
+                            keyPlaceholder="Query Param"
+                            environment={environment}
+                        />
+                    </div>
                 )}
                 {activeTab === 'Authorization' && (
                     <AuthorizationPanel auth={request.auth} onChange={handleAuthChange} environment={environment} />
                 )}
                 {activeTab === 'Headers' && (
-                    <KeyValueEditor 
-                        items={request.headers} 
-                        setItems={(updater) => setRequest(prev => ({...prev, headers: typeof updater === 'function' ? updater(prev.headers) : updater}))}
-                        keyPlaceholder="Header Name"
-                        environment={environment}
-                    />
+                    <div className="p-2">
+                        <KeyValueEditor 
+                            items={request.headers} 
+                            setItems={(updater) => setRequest(prev => ({...prev, headers: typeof updater === 'function' ? updater(prev.headers) : updater}))}
+                            keyPlaceholder="Header Name"
+                            environment={environment}
+                        />
+                    </div>
                 )}
                 {activeTab === 'Body' && (
-                    <CodeEditor
-                        value={request.body}
-                        onChange={(newBody) => setRequest({ ...request, body: newBody })}
-                        placeholder='{ "key": "value" }'
-                    />
+                     <div className="flex flex-col h-full">
+                        <div className="p-2 flex items-center space-x-2 border-b border-slate-800">
+                            {(Object.values(BodyType)).map(type => (
+                                <button key={type} onClick={() => handleBodyTypeChange(type)}
+                                    className={`px-2 py-0.5 text-xs rounded-md transition-colors capitalize ${request.bodyType === type || (!request.bodyType && type === BodyType.RAW) ? 'bg-indigo-600 text-white' : 'bg-slate-700 hover:bg-slate-600'}`}
+                                >
+                                    {type.replace('-', ' ')}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="flex-1 overflow-auto">
+                            {(!request.bodyType || request.bodyType === BodyType.RAW) && (
+                                <div className="p-2 h-full">
+                                    <CodeEditor
+                                        value={request.body}
+                                        onChange={(newBody) => setRequest({ ...request, body: newBody })}
+                                        placeholder='{ "key": "value" }'
+                                    />
+                                </div>
+                            )}
+                            {(request.bodyType === BodyType.FORMDATA || request.bodyType === BodyType.URLENCODED) && (
+                                <div className="p-2">
+                                    <KeyValueEditor
+                                        items={request.formData || []}
+                                        setItems={(updater) => setRequest(prev => ({...prev, formData: typeof updater === 'function' ? updater(prev.formData || []) : updater}))} 
+                                        keyPlaceholder="Field Name"
+                                        environment={environment}
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    </div>
                 )}
             </div>
         </div>

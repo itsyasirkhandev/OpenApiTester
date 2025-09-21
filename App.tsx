@@ -1,7 +1,7 @@
 
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 // Fix: Add CollectionItem and CollectionRequest to imports
-import { ApiRequest, ApiResponse, HttpMethod, AuthType, Environment } from './types';
+import { ApiRequest, ApiResponse, HttpMethod, AuthType, Environment, BodyType } from './types';
 import RequestPanel from './components/RequestPanel';
 import ResponsePanel from './components/ResponsePanel';
 import HistorySidebar from './components/HistorySidebar';
@@ -20,11 +20,11 @@ const createDefaultRequest = (): ApiRequest => ({
     method: HttpMethod.GET,
     url: '',
     params: [],
-    headers: [
-        { id: crypto.randomUUID(), key: 'Content-Type', value: 'application/json', enabled: true }
-    ],
+    headers: [],
     body: '',
-    auth: { type: AuthType.NONE }
+    auth: { type: AuthType.NONE },
+    bodyType: BodyType.RAW,
+    formData: [],
 });
 
 const usePersistentState = <T,>(key: string, defaultValue: T): [T, React.Dispatch<React.SetStateAction<T>>] => {
@@ -189,13 +189,14 @@ function App() {
             activeTab.params.filter(p => p.enabled && p.key).forEach(p => finalParams.set(p.key, substituteVariables(p.value, environment)));
             const finalQueryString = finalParams.toString();
             const finalUrlString = finalQueryString ? `${finalBaseUrl}?${finalQueryString}` : finalBaseUrl;
-            const substitutedBody = substituteVariables(activeTab.body, environment);
-            const finalBody = typeof substitutedBody === 'object' ? JSON.stringify(substitutedBody) : substitutedBody;
+            
+            const bodyType = activeTab.bodyType || BodyType.RAW;
 
             const finalRequest: ApiRequest = {
                 ...activeTab, url: finalUrlString,
                 headers: activeTab.headers.map(h => ({...h, value: substituteVariables(h.value, environment)})),
-                body: finalBody,
+                body: substituteVariables(activeTab.body, environment),
+                formData: (activeTab.formData || []).map(kv => ({...kv, value: substituteVariables(kv.value, environment)})),
                 auth: { ...activeTab.auth,
                     bearerToken: substituteVariables(activeTab.auth.bearerToken || '', environment),
                     basicUsername: substituteVariables(activeTab.auth.basicUsername || '', environment),
@@ -204,12 +205,39 @@ function App() {
             };
             
             const headers = new Headers();
-            finalRequest.headers.filter(h => h.enabled && h.key).forEach(h => headers.append(h.key, h.value));
+            finalRequest.headers.filter(h => h.enabled && h.key).forEach(h => {
+                // For form-data, let browser set content-type
+                if (bodyType === BodyType.FORMDATA && h.key.toLowerCase() === 'content-type') {
+                    return;
+                }
+                headers.append(h.key, h.value)
+            });
             const authHeader = getAuthHeader(finalRequest.auth);
             if (authHeader) headers.append('Authorization', authHeader);
 
+            // Add Content-Type if it's not set by the user and is applicable
+            if (!headers.has('Content-Type') && !['GET', 'HEAD'].includes(finalRequest.method)) {
+                if (bodyType === BodyType.URLENCODED) {
+                     headers.set('Content-Type', 'application/x-www-form-urlencoded;charset=UTF-8');
+                } else if (bodyType === BodyType.RAW && finalRequest.body) {
+                    headers.set('Content-Type', 'application/json');
+                }
+            }
+
             const fetchOptions: RequestInit = { method: finalRequest.method, headers };
-            if (!['GET', 'HEAD'].includes(finalRequest.method) && finalRequest.body) fetchOptions.body = finalRequest.body;
+            if (!['GET', 'HEAD'].includes(finalRequest.method)) {
+                if (bodyType === BodyType.FORMDATA && finalRequest.formData) {
+                    const formData = new FormData();
+                    finalRequest.formData.filter(d => d.enabled && d.key).forEach(d => formData.append(d.key, d.value));
+                    fetchOptions.body = formData;
+                } else if (bodyType === BodyType.URLENCODED && finalRequest.formData) {
+                    const urlEncodedData = new URLSearchParams();
+                    finalRequest.formData.filter(d => d.enabled && d.key).forEach(d => urlEncodedData.append(d.key, d.value));
+                    fetchOptions.body = urlEncodedData;
+                } else { // RAW or undefined
+                    if(finalRequest.body) fetchOptions.body = finalRequest.body;
+                }
+            }
 
             const finalUrl = finalRequest.url;
             const res = await fetch(finalUrl, fetchOptions);

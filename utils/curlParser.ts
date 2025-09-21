@@ -1,184 +1,177 @@
 
-import { ApiRequest, HttpMethod, KeyValue, AuthType } from '../types';
+import { ApiRequest, HttpMethod, KeyValue, AuthType, BodyType } from '../types';
 
 const unquote = (str: string): string => {
-    if ((str.startsWith("'") && str.endsWith("'")) || (str.startsWith('"') && str.endsWith('"'))) {
-        return str.slice(1, -1);
+    if (!str) return '';
+    const firstChar = str[0];
+    const lastChar = str[str.length - 1];
+
+    if (str.length >= 2 && firstChar === lastChar && (firstChar === "'" || firstChar === '"')) {
+        const inner = str.slice(1, -1);
+        
+        if (firstChar === "'") {
+            // In single quotes, everything is literal.
+            return inner;
+        }
+
+        if (firstChar === '"') {
+            // In double quotes, unescape \" and \\.
+            // This regex finds a backslash followed by either a quote or another backslash,
+            // and replaces the two-character sequence with just the second character.
+            return inner.replace(/\\(["\\])/g, '$1');
+        }
     }
+    
     return str;
 };
 
-// A more robust command splitter that respects single and double quotes,
-// allowing for spaces and newlines within quoted arguments.
 const splitCommand = (command: string): string[] => {
-    const args: string[] = [];
-    let currentArg = '';
-    let inQuote: '"' | "'" | null = null;
-    let i = 0;
-    
-    command = command.trim();
-
-    while (i < command.length) {
-        const char = command[i];
-
-        if (inQuote) {
-            // This is a simplified parser; it doesn't handle escaped quotes inside.
-            if (char === inQuote) {
-                inQuote = null;
-            }
-            currentArg += char;
-        } else {
-            if (char === "'" || char === '"') {
-                inQuote = char;
-                currentArg += char;
-            } else if (/\s/.test(char)) {
-                if (currentArg.length > 0) {
-                    args.push(currentArg);
-                    currentArg = '';
-                }
-            } else {
-                currentArg += char;
-            }
-        }
-        i++;
-    }
-
-    if (currentArg.length > 0) {
-        args.push(currentArg);
-    }
-
-    return args;
+    // This regex handles splitting by spaces, but respects quoted strings.
+    // It's not perfect for all edge cases of escaped quotes within quotes, but good for most.
+    const regex = /[^\s"']+|"([^"\\]*(\\.[^"\\]*)*)"|'([^'\\]*(\\.[^'\\]*)*)'/g;
+    return command.match(regex) || [];
 };
 
 
 export const parseCurlCommand = (curlString: string): Partial<ApiRequest> => {
-    // Replace shell line continuations (`\ ` at the end of a line) with a space.
-    const cleanedCommand = curlString.replace(/\s*\\\r?\n\s*/g, ' ');
-    const args = splitCommand(cleanedCommand);
-
-    if (args[0] !== 'curl') {
+    const cleanedCommand = curlString.replace(/\s*\\\r?\n\s*/g, ' ').trim();
+    if (!cleanedCommand.startsWith('curl')) {
         throw new Error("Command must start with 'curl'.");
     }
+    
+    const args = splitCommand(cleanedCommand);
+    args.shift(); // remove 'curl'
 
-    const request: Partial<ApiRequest> & { headers: KeyValue[] } = {
+    const request: Partial<ApiRequest> & { headers: KeyValue[]; params: KeyValue[]; formData: KeyValue[] } = {
         headers: [],
         params: [],
+        formData: [],
+        bodyType: BodyType.RAW,
     };
     
-    let hasData = false;
-    let explicitMethod = false;
+    let dataParts: {type: 'form' | 'data', value: string}[] = [];
+    let explicitMethod: HttpMethod | undefined;
 
-    // A set of flags that take a value, to help identify the positional URL argument.
     const valueTakingFlags = new Set([
-        '-X', '--request', 
-        '-H', '--header', 
-        '-d', '--data', '--data-raw', '--data-binary', 
-        '-u', '--user', 
-        '--url'
+        '-X', '--request', '-H', '--header', '-d', '--data', '--data-raw',
+        '-u', '--user', '--url', '--form', '--data-urlencode'
     ]);
-
-    // First pass: Find the URL.
-    let rawUrl = '';
-    const urlFlagIndex = args.indexOf('--url');
-    if (urlFlagIndex > -1 && args.length > urlFlagIndex + 1) {
-        rawUrl = unquote(args[urlFlagIndex + 1]);
+    
+    // Find URL first - it's usually the first argument that is not a flag or a value for a flag.
+    let urlString: string | undefined;
+    const urlFlagIndex = args.findIndex(arg => arg === '--url');
+    if (urlFlagIndex !== -1 && args.length > urlFlagIndex + 1) {
+        urlString = unquote(args[urlFlagIndex + 1]);
     } else {
-        // Find the first positional argument that isn't a value for another flag.
-        for (let i = 1; i < args.length; i++) {
+        for (let i = 0; i < args.length; i++) {
             const arg = args[i];
             if (valueTakingFlags.has(arg)) {
-                i++; // This is a flag, skip its value in the next iteration.
+                i++; // skip next arg as it's a value for this flag
                 continue;
             }
             if (!arg.startsWith('-')) {
-                rawUrl = unquote(arg);
-                break; // Found the positional URL.
+                urlString = unquote(arg);
+                break;
             }
         }
     }
-    
-    if (!rawUrl) {
-         throw new Error("Could not find a URL in the command.");
-    }
-    
-    // Process the found URL to separate the base from query params.
+
+    if (!urlString) throw new Error("Could not find a URL in the command.");
+
     try {
-        const url = new URL(rawUrl.startsWith('http') ? rawUrl : `http://${rawUrl}`);
-        const params: KeyValue[] = [];
-        url.searchParams.forEach((value, key) => {
-            params.push({ id: crypto.randomUUID(), key, value, enabled: true });
-        });
-        request.params = params;
+        const url = new URL(urlString.startsWith('http') ? urlString : `https:// ${urlString}`);
         request.url = url.origin + url.pathname;
-    } catch (e) {
-        // Handle URLs with template variables that might not be valid.
-        const [baseUrl, queryString] = rawUrl.split('?');
+        url.searchParams.forEach((value, key) => {
+            request.params.push({ id: crypto.randomUUID(), key, value, enabled: true });
+        });
+    } catch(e) {
+        const [baseUrl, query] = urlString.split('?');
         request.url = baseUrl;
-        if (queryString) {
-            try {
-                const searchParams = new URLSearchParams(queryString);
-                const params: KeyValue[] = [];
-                searchParams.forEach((value, key) => {
-                    params.push({ id: crypto.randomUUID(), key, value, enabled: true });
-                });
-                request.params = params;
-            } catch (qsError) {
-                // Could not parse query string, ignore.
-            }
+        if (query) {
+            const params = new URLSearchParams(query);
+            params.forEach((value, key) => {
+                request.params.push({ id: crypto.randomUUID(), key, value, enabled: true });
+            });
         }
     }
 
-
-    // Second pass: Process all other arguments.
-    for (let i = 1; i < args.length; i++) {
+    for (let i = 0; i < args.length; i++) {
         const arg = args[i];
+        if (arg === urlString || unquote(arg) === urlString) continue;
 
         switch (arg) {
-            case '--url':
-                i++; // Already processed, just skip the value.
+            case '-L': case '--location':
                 break;
-            case '-X':
-            case '--request':
-                request.method = args[++i].toUpperCase() as HttpMethod;
-                explicitMethod = true;
+            case '-X': case '--request':
+                explicitMethod = args[++i].toUpperCase() as HttpMethod;
                 break;
-
-            case '-H':
-            case '--header':
+            case '-H': case '--header':
                 const headerStr = unquote(args[++i]);
                 const separatorIndex = headerStr.indexOf(':');
                 if (separatorIndex === -1) continue;
-
                 const key = headerStr.slice(0, separatorIndex).trim();
                 const value = headerStr.slice(separatorIndex + 1).trim();
-
                 request.headers.push({ id: crypto.randomUUID(), key, value, enabled: true });
                 break;
-
-            case '-d':
-            case '--data':
-            case '--data-raw':
-            case '--data-binary':
-                request.body = unquote(args[++i]);
-                hasData = true;
+            case '--form':
+                dataParts.push({ type: 'form', value: unquote(args[++i]) });
                 break;
-            
-            case '-u':
-            case '--user':
+            case '-d': case '--data': case '--data-raw': case '--data-binary': case '--data-urlencode':
+                dataParts.push({ type: 'data', value: unquote(args[++i]) });
+                break;
+            case '-u': case '--user':
                 const credentials = unquote(args[++i]);
                 const [username, ...passwordParts] = credentials.split(':');
-                const password = passwordParts.join(':');
                 request.auth = {
                     type: AuthType.BASIC,
                     basicUsername: username,
-                    basicPassword: password
+                    basicPassword: passwordParts.join(':')
                 };
+                break;
+            case '--url':
+                i++; // already handled
                 break;
         }
     }
+    
+    if (explicitMethod) request.method = explicitMethod;
 
-    // Handle Auth from headers if not set by -u
-    if (!request.auth || request.auth.type === AuthType.NONE) {
+    if (dataParts.length > 0) {
+        if (!request.method) request.method = HttpMethod.POST;
+        
+        const hasForm = dataParts.some(p => p.type === 'form');
+        if (hasForm) {
+            request.bodyType = BodyType.FORMDATA;
+            for (const part of dataParts) {
+                const [key, ...valueParts] = part.value.split('=');
+                const value = valueParts.join('=');
+                if (value.startsWith('@')) {
+                    request.formData.push({ id: crypto.randomUUID(), key, value: `File: ${value.substring(1)} (File uploads not yet supported)`, enabled: false });
+                } else {
+                    request.formData.push({ id: crypto.randomUUID(), key, value, enabled: true });
+                }
+            }
+        } else {
+            const contentTypeHeader = request.headers.find(h => h.key.toLowerCase() === 'content-type');
+            if (contentTypeHeader && contentTypeHeader.value.toLowerCase().includes('application/json')) {
+                request.bodyType = BodyType.RAW;
+                request.body = dataParts.map(p => p.value).join('&');
+            } else {
+                request.bodyType = BodyType.URLENCODED;
+                for (const part of dataParts) {
+                    const pairs = part.value.split('&');
+                    for (const pair of pairs) {
+                         const [key, ...valueParts] = pair.split('=');
+                         request.formData.push({ id: crypto.randomUUID(), key, value: valueParts.join('='), enabled: true });
+                    }
+                }
+            }
+        }
+    }
+    
+    if (!request.method) request.method = HttpMethod.GET;
+
+    if (!request.auth) {
         const authHeader = request.headers.find(h => h.key.toLowerCase() === 'authorization');
         if (authHeader) {
             const [authType, token] = authHeader.value.split(' ');
@@ -188,18 +181,10 @@ export const parseCurlCommand = (curlString: string): Partial<ApiRequest> => {
                 try {
                     const decoded = atob(token);
                     const [username, ...passwordParts] = decoded.split(':');
-                    const password = passwordParts.join(':');
-                    request.auth = { type: AuthType.BASIC, basicUsername: username, basicPassword: password };
-                } catch (e) {
-                    console.error("Failed to decode Basic auth token.");
-                }
+                    request.auth = { type: AuthType.BASIC, basicUsername: username, basicPassword: passwordParts.join(':') };
+                } catch (e) { console.error("Failed to decode Basic auth token."); }
             }
         }
-    }
-
-
-    if (!explicitMethod) {
-        request.method = hasData ? HttpMethod.POST : HttpMethod.GET;
     }
 
     return request;
